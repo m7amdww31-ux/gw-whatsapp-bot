@@ -13,20 +13,54 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_KEY")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-PACKAGES = """
-باقاتنا في GW:
-1 - شهر واحد: 29 ريال
-2 - 3 اشهر: 49 ريال
-3 - 6 اشهر: 69 ريال
-4 - سنة كاملة: 99 ريال
-جميع الباقات تشمل افلام ومسلسلات وبث مباريات مباشر
-"""
+PACKAGES = "1-شهر: 29 ريال | 2-ثلاثة اشهر: 49 ريال | 3-ستة اشهر: 69 ريال | 4-سنة: 99 ريال"
 
-SYSTEM_PROMPT = f"""انت مساعد مبيعات لمتجر GW للاشتراكات. رد بالعربية باسلوب ودي.
-باقاتنا: {PACKAGES}
-اذا اراد الاشتراك اطلب اسمه والباقة التي يريدها ثم اخبره ان الفريق سيتواصل معه."""
+SYSTEM_PROMPT = "انت مساعد مبيعات لمتجر GW للاشتراكات. رد بالعربية باسلوب ودي. باقاتنا: " + PACKAGES + ". اذا اراد الاشتراك اطلب اسمه والباقة ثم اخبره ان الفريق سيتواصل معه."
 
 conversations = {}
 
 @app.get("/webhook")
-async
+async def verify(request: Request):
+    params = dict(request.query_params)
+    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == VERIFY_TOKEN:
+        return PlainTextResponse(params.get("hub.challenge"))
+    raise HTTPException(status_code=403)
+
+@app.post("/webhook")
+async def receive(request: Request):
+    body = await request.json()
+    try:
+        msg = body["entry"][0]["changes"][0]["value"]["messages"][0]
+        from_num = msg["from"]
+        if msg.get("type") != "text":
+            await send_msg(from_num, "ارسل رسالة نصية وسنساعدك")
+            return {"status": "ok"}
+        text = msg["text"]["body"]
+        if from_num not in conversations:
+            conversations[from_num] = []
+        conversations[from_num].append({"role": "user", "content": text})
+        if len(conversations[from_num]) > 20:
+            conversations[from_num] = conversations[from_num][-20:]
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=500,
+            system=SYSTEM_PROMPT,
+            messages=conversations[from_num]
+        )
+        reply = response.content[0].text
+        conversations[from_num].append({"role": "assistant", "content": reply})
+        await send_msg(from_num, reply)
+    except Exception as e:
+        print("خطا: " + str(e))
+    return {"status": "ok"}
+
+async def send_msg(to, text):
+    url = "https://graph.facebook.com/v19.0/" + PHONE_NUMBER_ID + "/messages"
+    headers = {"Authorization": "Bearer " + WHATSAPP_TOKEN, "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
+    async with httpx.AsyncClient() as http:
+        await http.post(url, headers=headers, json=payload)
+
+@app.get("/")
+async def root():
+    return {"status": "GW Bot يعمل"}
